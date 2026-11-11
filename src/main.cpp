@@ -1,7 +1,20 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/EditorUI.hpp>
+#include <Geode/modify/LevelEditorLayer.hpp>
+#include <unordered_set>
+#include <vector>
 
 using namespace geode::prelude;
+
+static void collectButtons(CCNode* node, std::vector<CCMenuItemSpriteExtra*>& out) {
+    if (!node) return;
+    if (auto btn = typeinfo_cast<CCMenuItemSpriteExtra*>(node)) out.push_back(btn);
+    auto children = node->getChildren();
+    if (!children) return;
+    for (unsigned int i = 0; i < children->count(); i++) {
+        collectButtons(static_cast<CCNode*>(children->objectAtIndex(i)), out);
+    }
+}
 
 class $modify(PracticeEditorUI, EditorUI) {
     struct Fields {
@@ -46,10 +59,26 @@ class $modify(PracticeEditorUI, EditorUI) {
         if (!m_playtestBtn || !m_playtestStopBtn || !m_playbackBtn) return;
         if (m_playtestStopBtn->isVisible()) return; // a playtest is already running
 
+        // remember which buttons are visible before the playtest starts
+        std::vector<CCMenuItemSpriteExtra*> before;
+        collectButtons(this, before);
+        std::unordered_set<CCMenuItemSpriteExtra*> visibleBefore;
+        for (auto b : before) {
+            if (b->isVisible()) visibleBefore.insert(b);
+        }
+
         f->m_practiceActive = true;
 
         // start the normal playtest (the playtest button turns into pause)
         m_playtestBtn->activate();
+
+        // hide extra buttons the playtest shows (like START POS)
+        std::vector<CCMenuItemSpriteExtra*> after;
+        collectButtons(this, after);
+        for (auto b : after) {
+            if (b == m_playtestStopBtn || b == m_playtestBtn || b == f->m_practiceBtn) continue;
+            if (b->isVisible() && visibleBefore.count(b) == 0) b->setVisible(false);
+        }
 
         // hide our button, its spot is taken by pause
         if (f->m_practiceBtn) f->m_practiceBtn->setVisible(false);
@@ -92,14 +121,14 @@ class $modify(PracticeEditorUI, EditorUI) {
         if (m_playtestBtn) m_playtestBtn->setPosition(f->m_testPos);
         if (f->m_practiceBtn) f->m_practiceBtn->setVisible(true);
     }
+};
 
-    void onStopPlaytest(CCObject* sender) {
-        EditorUI::onStopPlaytest(sender);
-        this->restorePractice();
-    }
-
-    void playtestStopped() {
-        EditorUI::playtestStopped();
-        this->restorePractice();
+// the playtest really ended (stop button, or any other way it stops)
+class $modify(PracticeLevelEditorLayer, LevelEditorLayer) {
+    void onStopPlaytest() {
+        LevelEditorLayer::onStopPlaytest();
+        if (m_editorUI) {
+            static_cast<PracticeEditorUI*>(m_editorUI)->restorePractice();
+        }
     }
 };
