@@ -1,6 +1,7 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/EditorUI.hpp>
 #include <Geode/modify/LevelEditorLayer.hpp>
+#include <Geode/modify/UILayer.hpp>
 
 using namespace geode::prelude;
 
@@ -89,6 +90,12 @@ class $modify(PracticeEditorUI, EditorUI) {
         m_playtestStopBtn->setPosition(stopParent->convertToNodeSpace(stopWorld));
     }
 
+    void showCheckpointButtons(bool show) {
+        if (auto ui = UILayer::get()) {
+            ui->toggleCheckpointsMenu(show);
+        }
+    }
+
     // playing: pause icon is shown, paused: your practice icon is shown
     void applyPracticeState() {
         auto f = m_fields.self();
@@ -100,6 +107,7 @@ class $modify(PracticeEditorUI, EditorUI) {
             if (m_playtestBtn) m_playtestBtn->setVisible(true);
             if (f->m_practiceBtn) f->m_practiceBtn->setVisible(false);
         }
+        this->showCheckpointButtons(true);
     }
 
     void setPracticePaused(bool paused) {
@@ -119,6 +127,8 @@ class $modify(PracticeEditorUI, EditorUI) {
         if (!f->m_practiceActive) return;
         f->m_practiceActive = false;
         f->m_paused = false;
+
+        this->showCheckpointButtons(false);
 
         if (m_playtestStopBtn) m_playtestStopBtn->setPosition(f->m_stopPos);
         if (m_playtestBtn) {
@@ -150,5 +160,18 @@ class $modify(PracticeLevelEditorLayer, LevelEditorLayer) {
         if (m_editorUI) {
             static_cast<PracticeEditorUI*>(m_editorUI)->restorePractice();
         }
+    }
+};
+
+// Batch 4: the checkpoint buttons do nothing yet in the editor (Batch 5 adds this)
+class $modify(PracticeUILayer, UILayer) {
+    void onCheck(CCObject* sender) {
+        if (m_editorMode || LevelEditorLayer::get()) return;
+        UILayer::onCheck(sender);
+    }
+
+    void onDeleteCheck(CCObject* sender) {
+        if (m_editorMode || LevelEditorLayer::get()) return;
+        UILayer::onDeleteCheck(sender);
     }
 };
