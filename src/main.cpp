@@ -2,6 +2,7 @@
 #include <Geode/modify/EditorUI.hpp>
 #include <Geode/modify/LevelEditorLayer.hpp>
 #include <Geode/modify/UILayer.hpp>
+#include <algorithm>
 #include <vector>
 
 using namespace geode::prelude;
@@ -24,13 +25,36 @@ static void showMsg(std::string const& text) {
     Notification::create(text, NotificationIcon::None, 1.f)->show();
 }
 
+// put the players back into the latest saved checkpoint state
+static bool respawnAtCheckpoint(LevelEditorLayer* lel) {
+    auto& d = practiceData();
+    if (d.p1.empty() || !lel || !lel->m_player1) return false;
+
+    auto cp1 = d.p1.back();
+    if (!cp1.data()) return false;
+    lel->m_player1->loadFromCheckpoint(cp1.data());
+
+    if (!d.p2.empty()) {
+        auto cp2 = d.p2.back();
+        if (cp2.data() && lel->m_player2) {
+            lel->m_player2->loadFromCheckpoint(cp2.data());
+        }
+    }
+    return true;
+}
+
 class $modify(PracticeEditorUI, EditorUI) {
     struct Fields {
         bool m_practiceActive = false;
         bool m_paused = false;
+        bool m_userStop = false;
+        bool m_respawning = false;
         CCPoint m_stopPos;
         CCPoint m_testPos;
         CCMenuItemSpriteExtra* m_practiceBtn = nullptr;
+        CCMenu* m_checkMenu = nullptr;
+        CCMenuItemSpriteExtra* m_placeBtn = nullptr;
+        CCMenuItemSpriteExtra* m_removeBtn = nullptr;
     };
 
     bool init(LevelEditorLayer* editor) {
@@ -66,6 +90,14 @@ class $modify(PracticeEditorUI, EditorUI) {
         return m_fields->m_practiceActive;
     }
 
+    bool wasUserStop() {
+        return m_fields->m_userStop;
+    }
+
+    void clearUserStop() {
+        m_fields->m_userStop = false;
+    }
+
     void onPracticeButton(CCObject*) {
         auto f = m_fields.self();
         if (!m_playtestBtn || !m_playtestStopBtn || !m_playbackBtn) return;
@@ -77,9 +109,10 @@ class $modify(PracticeEditorUI, EditorUI) {
         }
         if (m_playtestStopBtn->isVisible()) return; // a normal playtest is running
 
-        practiceData().clear();
+        if (!f->m_respawning) practiceData().clear();
         f->m_practiceActive = true;
         f->m_paused = false;
+        f->m_userStop = false;
 
         // start the normal playtest (the playtest button turns into pause)
         m_playtestBtn->activate();
@@ -120,6 +153,110 @@ class $modify(PracticeEditorUI, EditorUI) {
         }
     }
 
+    // invisible tap areas on top of the game's two checkpoint buttons
+    void updateCheckpointTouchButtons(bool show) {
+        auto f = m_fields.self();
+        if (!show) {
+            if (f->m_checkMenu) f->m_checkMenu->setVisible(false);
+            return;
+        }
+
+        auto ui = UILayer::get();
+        if (!ui || !ui->m_checkpointMenu) return;
+        auto children = ui->m_checkpointMenu->getChildren();
+        if (!children) return;
+
+        std::vector<CCMenuItem*> items;
+        for (unsigned int i = 0; i < children->count(); i++) {
+            auto node = static_cast<CCNode*>(children->objectAtIndex(i));
+            if (auto item = typeinfo_cast<CCMenuItem*>(node)) {
+                if (item->getParent()) items.push_back(item);
+            }
+        }
+        if (items.size() < 2) return;
+
+        auto worldPos = [](CCMenuItem* it) {
+            return it->getParent()->convertToWorldSpace(it->getPosition());
+        };
+        auto worldSize = [](CCMenuItem* it) {
+            auto parent = it->getParent();
+            auto o = parent->convertToWorldSpace(ccp(0.f, 0.f));
+            auto ex = parent->convertToWorldSpace(ccp(1.f, 0.f));
+            auto ey = parent->convertToWorldSpace(ccp(0.f, 1.f));
+            auto cs = it->getScaledContentSize();
+            return CCSize(cs.width * ccpDistance(o, ex), cs.height * ccpDistance(o, ey));
+        };
+
+        // the left button places a checkpoint, the right one removes it
+        std::sort(items.begin(), items.end(), [&](CCMenuItem* a, CCMenuItem* b) {
+            return worldPos(a).x < worldPos(b).x;
+        });
+        auto placeItem = items.front();
+        auto removeItem = items.back();
+
+        if (!f->m_checkMenu) {
+            f->m_checkMenu = CCMenu::create();
+            f->m_checkMenu->setPosition({0.f, 0.f});
+            f->m_checkMenu->setTouchPriority(-1000);
+            this->addChild(f->m_checkMenu, 20);
+
+            auto nodeA = CCNode::create();
+            nodeA->setAnchorPoint({0.5f, 0.5f});
+            nodeA->setContentSize(worldSize(placeItem));
+            f->m_placeBtn = CCMenuItemSpriteExtra::create(
+                nodeA, this, menu_selector(PracticeEditorUI::onPlaceCheckpoint)
+            );
+            f->m_checkMenu->addChild(f->m_placeBtn);
+
+            auto nodeB = CCNode::create();
+            nodeB->setAnchorPoint({0.5f, 0.5f});
+            nodeB->setContentSize(worldSize(removeItem));
+            f->m_removeBtn = CCMenuItemSpriteExtra::create(
+                nodeB, this, menu_selector(PracticeEditorUI::onRemoveCheckpoint)
+            );
+            f->m_checkMenu->addChild(f->m_removeBtn);
+        }
+
+        f->m_placeBtn->setPosition(this->convertToNodeSpace(worldPos(placeItem)));
+        f->m_removeBtn->setPosition(this->convertToNodeSpace(worldPos(removeItem)));
+        f->m_checkMenu->setVisible(true);
+    }
+
+    void onPlaceCheckpoint(CCObject*) {
+        auto f = m_fields.self();
+        if (!f->m_practiceActive || !m_editorLayer) return;
+        auto lel = m_editorLayer;
+        if (!lel->m_player1) return;
+
+        auto cp1 = PlayerCheckpoint::create();
+        if (!cp1) return;
+        lel->m_player1->saveToCheckpoint(cp1);
+
+        PlayerCheckpoint* cp2 = nullptr;
+        if (lel->m_player2 && lel->m_player2->isVisible()) {
+            cp2 = PlayerCheckpoint::create();
+            if (cp2) lel->m_player2->saveToCheckpoint(cp2);
+        }
+
+        auto& d = practiceData();
+        d.p1.push_back(Ref<PlayerCheckpoint>(cp1));
+        d.p2.push_back(Ref<PlayerCheckpoint>(cp2));
+        showMsg(fmt::format("Checkpoint {} placed", d.p1.size()));
+    }
+
+    void onRemoveCheckpoint(CCObject*) {
+        auto f = m_fields.self();
+        if (!f->m_practiceActive) return;
+        auto& d = practiceData();
+        if (d.p1.empty()) {
+            showMsg("No checkpoint to remove");
+            return;
+        }
+        d.p1.pop_back();
+        if (!d.p2.empty()) d.p2.pop_back();
+        showMsg(fmt::format("Checkpoint removed ({} left)", d.p1.size()));
+    }
+
     // playing: pause icon is shown, paused: your practice icon is shown
     void applyPracticeState() {
         auto f = m_fields.self();
@@ -132,6 +269,7 @@ class $modify(PracticeEditorUI, EditorUI) {
             if (f->m_practiceBtn) f->m_practiceBtn->setVisible(false);
         }
         this->showCheckpointButtons(true);
+        this->updateCheckpointTouchButtons(true);
     }
 
     void setPracticePaused(bool paused) {
@@ -146,14 +284,23 @@ class $modify(PracticeEditorUI, EditorUI) {
         this->applyPracticeState();
     }
 
+    // the stop button was pressed by you (so it is not a death)
+    void onStopPlaytest(CCObject* sender) {
+        auto f = m_fields.self();
+        f->m_userStop = true;
+        f->m_respawning = false;
+        EditorUI::onStopPlaytest(sender);
+    }
+
     void restorePractice() {
         auto f = m_fields.self();
         if (!f->m_practiceActive) return;
         f->m_practiceActive = false;
         f->m_paused = false;
-        practiceData().clear();
+        if (!f->m_respawning) practiceData().clear();
 
         this->showCheckpointButtons(false);
+        this->updateCheckpointTouchButtons(false);
 
         if (m_playtestStopBtn) m_playtestStopBtn->setPosition(f->m_stopPos);
         if (m_playtestBtn) {
@@ -162,66 +309,44 @@ class $modify(PracticeEditorUI, EditorUI) {
         }
         if (f->m_practiceBtn) f->m_practiceBtn->setVisible(true);
     }
+
+    // death: reset the UI, then start the practice playtest again shortly
+    void beginRespawn() {
+        auto f = m_fields.self();
+        f->m_respawning = true;
+        this->restorePractice();
+        this->runAction(CCSequence::create(
+            CCDelayTime::create(0.15f),
+            CCCallFunc::create(this, callfunc_selector(PracticeEditorUI::restartPractice)),
+            nullptr
+        ));
+    }
+
+    void restartPractice() {
+        auto f = m_fields.self();
+        if (!f->m_respawning) return; // you pressed stop in the meantime
+
+        this->onPracticeButton(nullptr);
+        if (!f->m_practiceActive) {
+            f->m_respawning = false;
+            practiceData().clear();
+            showMsg("Could not restart the practice playtest");
+            return;
+        }
+        this->runAction(CCSequence::create(
+            CCDelayTime::create(0.1f),
+            CCCallFunc::create(this, callfunc_selector(PracticeEditorUI::applyRespawnCheckpoint)),
+            nullptr
+        ));
+    }
+
+    void applyRespawnCheckpoint() {
+        auto f = m_fields.self();
+        if (!f->m_respawning) return;
+        f->m_respawning = false;
+        if (f->m_practiceActive) respawnAtCheckpoint(m_editorLayer);
+    }
 };
-
-static PracticeEditorUI* practiceUI() {
-    auto lel = LevelEditorLayer::get();
-    if (!lel || !lel->m_editorUI) return nullptr;
-    return static_cast<PracticeEditorUI*>(lel->m_editorUI);
-}
-
-static void placePracticeCheckpoint() {
-    auto ui = practiceUI();
-    if (!ui || !ui->isPracticeActive()) return;
-    auto lel = LevelEditorLayer::get();
-    if (!lel || !lel->m_player1) return;
-
-    auto cp1 = PlayerCheckpoint::create();
-    if (!cp1) return;
-    lel->m_player1->saveToCheckpoint(cp1);
-
-    PlayerCheckpoint* cp2 = nullptr;
-    if (lel->m_player2 && lel->m_player2->isVisible()) {
-        cp2 = PlayerCheckpoint::create();
-        if (cp2) lel->m_player2->saveToCheckpoint(cp2);
-    }
-
-    auto& d = practiceData();
-    d.p1.push_back(Ref<PlayerCheckpoint>(cp1));
-    d.p2.push_back(Ref<PlayerCheckpoint>(cp2));
-    showMsg(fmt::format("Checkpoint {} placed", d.p1.size()));
-}
-
-static void removePracticeCheckpoint() {
-    auto ui = practiceUI();
-    if (!ui || !ui->isPracticeActive()) return;
-    auto& d = practiceData();
-    if (d.p1.empty()) {
-        showMsg("No checkpoint to remove");
-        return;
-    }
-    d.p1.pop_back();
-    if (!d.p2.empty()) d.p2.pop_back();
-    showMsg(fmt::format("Checkpoint removed ({} left)", d.p1.size()));
-}
-
-static bool respawnAtCheckpoint(LevelEditorLayer* lel) {
-    auto& d = practiceData();
-    if (d.p1.empty() || !lel || !lel->m_player1) return false;
-
-    auto cp1 = d.p1.back();
-    if (!cp1.data()) return false;
-    lel->m_player1->loadFromCheckpoint(cp1.data());
-    lel->m_player1->m_isDead = false;
-    lel->m_player1->setVisible(true);
-
-    auto cp2 = d.p2.empty() ? Ref<PlayerCheckpoint>() : d.p2.back();
-    if (cp2.data() && lel->m_player2) {
-        lel->m_player2->loadFromCheckpoint(cp2.data());
-        lel->m_player2->m_isDead = false;
-    }
-    return true;
-}
 
 class $modify(PracticeLevelEditorLayer, LevelEditorLayer) {
     void onPausePlaytest() {
@@ -238,45 +363,33 @@ class $modify(PracticeLevelEditorLayer, LevelEditorLayer) {
         }
     }
 
-    // the playtest really ended
+    // the playtest ended: either you pressed stop, or you died
     void onStopPlaytest() {
+        auto ui = m_editorUI ? static_cast<PracticeEditorUI*>(m_editorUI) : nullptr;
+        bool death = ui && ui->isPracticeActive() && !ui->wasUserStop();
+
         LevelEditorLayer::onStopPlaytest();
-        if (m_editorUI) {
-            auto ui = static_cast<PracticeEditorUI*>(m_editorUI);
-            if (ui->isPracticeActive()) showMsg("DEBUG: playtest stopped");
+        if (!ui) return;
+
+        if (death) {
+            showMsg("DEBUG: death, restarting");
+            ui->beginRespawn();
+        } else {
+            ui->clearUserStop();
             ui->restorePractice();
         }
     }
-
-    // death: respawn at the latest checkpoint instead of stopping
-    void playerTookDamage(PlayerObject* player) {
-        auto ui = m_editorUI ? static_cast<PracticeEditorUI*>(m_editorUI) : nullptr;
-        if (ui && ui->isPracticeActive()) {
-            if (respawnAtCheckpoint(this)) {
-                showMsg("DEBUG: died, respawned at checkpoint");
-                return;
-            }
-            showMsg("DEBUG: died, no checkpoint");
-        }
-        LevelEditorLayer::playerTookDamage(player);
-    }
 };
 
-// the game's checkpoint buttons now place and remove our checkpoints in the editor
+// the game's own checkpoint handlers must not run in the editor (our tap areas handle it)
 class $modify(PracticeUILayer, UILayer) {
     void onCheck(CCObject* sender) {
-        if (m_editorMode || LevelEditorLayer::get()) {
-            placePracticeCheckpoint();
-            return;
-        }
+        if (m_editorMode || LevelEditorLayer::get()) return;
         UILayer::onCheck(sender);
     }
 
     void onDeleteCheck(CCObject* sender) {
-        if (m_editorMode || LevelEditorLayer::get()) {
-            removePracticeCheckpoint();
-            return;
-        }
+        if (m_editorMode || LevelEditorLayer::get()) return;
         UILayer::onDeleteCheck(sender);
     }
 };
